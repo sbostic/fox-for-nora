@@ -1,5 +1,3 @@
-//! Plays animations from a skinned glTF.
-
 use std::f32::consts::PI;
 use std::time::Duration;
 
@@ -8,6 +6,8 @@ use bevy::{
     pbr::CascadeShadowConfigBuilder,
     prelude::*,
 };
+
+const FOX_GLB: &str = "assets/models/animated/Fox.glb"; //manually set this to the fixed location of Fox.glbt
 
 fn main() {
     App::new()
@@ -19,6 +19,8 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(Update, setup_scene_once_loaded.before(animate_targets))
         .add_systems(Update, keyboard_animation_control)
+        .add_systems(Update, follow_fox)
+        .add_systems(Update, move_fox)
         .run();
 }
 
@@ -28,6 +30,12 @@ struct Animations {
     #[allow(dead_code)]
     graph: Handle<AnimationGraph>,
 }
+
+#[derive(Component)]
+struct Fox; // Marker component for the fox
+
+#[derive(Component)]
+struct MoveSpeed(f32); // Component to store the speed of the fox
 
 fn setup(
     mut commands: Commands,
@@ -41,9 +49,9 @@ fn setup(
     let animations = graph
         .add_clips(
             [
-                GltfAssetLabel::Animation(2).from_asset("models/animated/Fox.glb"),
-                GltfAssetLabel::Animation(1).from_asset("models/animated/Fox.glb"),
-                GltfAssetLabel::Animation(0).from_asset("models/animated/Fox.glb"),
+                GltfAssetLabel::Animation(2).from_asset(FOX_GLB),
+                GltfAssetLabel::Animation(1).from_asset(FOX_GLB),
+                GltfAssetLabel::Animation(0).from_asset(FOX_GLB),
             ]
                 .into_iter()
                 .map(|path| asset_server.load(path)),
@@ -60,11 +68,14 @@ fn setup(
     });
 
     // Camera
-    commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(100.0, 100.0, 150.0)
-            .looking_at(Vec3::new(0.0, 20.0, 0.0), Vec3::Y),
-        ..default()
-    });
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::from_xyz(0.0, 200.0, -300.0) // Start behind the fox
+                .looking_at(Vec3::ZERO, Vec3::Y),
+            ..default()
+        },
+        FollowFox, // Add marker component to identify the following camera
+    ));
 
     // Plane
     commands.spawn(PbrBundle {
@@ -90,10 +101,14 @@ fn setup(
     });
 
     // Fox
-    commands.spawn(SceneBundle {
-        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("assets/models/animated/Fox.glb")),
-        ..default()
-    });
+    commands.spawn((
+        SceneBundle {
+            scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset(FOX_GLB)),
+            ..default()
+        },
+        Fox,      // Add the Fox component to identify this entity
+        MoveSpeed(5.0), // Add the MoveSpeed component to control movement speed
+    ));
 
     println!("Animation controls:");
     println!("  - spacebar: play / pause");
@@ -129,7 +144,7 @@ fn setup_scene_once_loaded(
 }
 
 fn keyboard_animation_control(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
+    keyboard_input: Res<ButtonInput<KeyCode>>, // Correctly import Input from Bevy
     mut animation_players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     animations: Res<Animations>,
     mut current_animation: Local<usize>,
@@ -208,6 +223,69 @@ fn keyboard_animation_control(
         if keyboard_input.just_pressed(KeyCode::KeyL) {
             let playing_animation = player.animation_mut(playing_animation_index).unwrap();
             playing_animation.set_repeat(RepeatAnimation::Forever);
+        }
+    }
+}
+
+#[derive(Component)]
+struct FollowFox; // Marker component for camera
+
+fn follow_fox(
+    fox_query: Query<&Transform, With<Fox>>,
+    mut camera_query: Query<&mut Transform, (With<FollowFox>, Without<Fox>)>,
+) {
+    if let Ok(fox_transform) = fox_query.get_single() {
+        for mut camera_transform in &mut camera_query {
+            // Calculate the position behind the fox
+            let fox_forward = fox_transform.rotation.mul_vec3(Vec3::Z);
+            let camera_offset = Vec3::new(0.0, 200.0, -300.0);
+            let camera_position = fox_transform.translation + fox_forward * camera_offset.z;
+
+            // Update camera position and look at the fox
+            camera_transform.translation = Vec3::new(
+                camera_position.x,
+                fox_transform.translation.y + camera_offset.y,
+                camera_position.z,
+            );
+
+            camera_transform.look_at(fox_transform.translation, Vec3::Y);
+        }
+    }
+}
+
+fn move_fox(
+    time: Res<Time>,
+    keyboard_input: Res<ButtonInput<KeyCode>>, // Correctly import Input from Bevy
+    mut fox_query: Query<(&mut Transform, &MoveSpeed), With<Fox>>,
+) {
+    for (mut transform, move_speed) in &mut fox_query {
+        let mut direction = Vec3::ZERO;
+
+        // Determine the direction based on key input
+        if keyboard_input.pressed(KeyCode::KeyW) {
+            direction.z -= 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::KeyS) {
+            direction.z += 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::KeyA) {
+            direction.x -= 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::KeyD) {
+            direction.x += 1.0;
+        }
+
+        // Normalize the direction vector to avoid faster diagonal movement
+        if direction != Vec3::ZERO {
+            direction = direction.normalize();
+        }
+
+        // Move the fox in the direction with the given speed
+        transform.translation += direction * move_speed.0 * time.delta_seconds();
+
+        // Update fox orientation to face the direction of movement
+        if direction != Vec3::ZERO {
+            transform.rotation = Quat::from_rotation_y(-direction.x.atan2(direction.z));
         }
     }
 }
